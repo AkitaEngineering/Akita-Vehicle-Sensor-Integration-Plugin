@@ -8,6 +8,9 @@ import obd
 import paho.mqtt.client as mqtt
 from meshtastic.util import get_lora_config
 import logging
+import can
+import socket
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -26,6 +29,8 @@ class AVSIP:
         self.connect_mqtt()
         self.obd_lock = threading.Lock()
         self.mqtt_lock = threading.Lock()
+        self.can_bus = None
+        self.traccar_socket = None
 
     def load_config(self):
         try:
@@ -85,10 +90,14 @@ class AVSIP:
     def _send_sensor_broadcast(self):
         while True:
             try:
-                self.connect_obd() #recheck obd connection.
+                self.connect_obd()
                 if self.obd_connection and self.obd_connection.is_connected():
                     sensor_values = self.get_obd_data()
                     if sensor_values:
+                        sensor_values.update(self.get_dtc_codes())
+                        gps = self.interface.meshtastic.getGps()
+                        if gps:
+                            sensor_values.update({"gps": gps})
                         self.sensor_data = {
                             "type": "vehicle_sensor",
                             "user_id": self.user_id,
@@ -99,6 +108,9 @@ class AVSIP:
                         if self.mqtt_client and self.mqtt_client.is_connected():
                             with self.mqtt_lock:
                                 self.mqtt_client.publish(self.config["mqtt"]["topic"], json.dumps(self.sensor_data), qos=self.config.get("mqtt", {}).get("qos", 0))
+                        if self.config.get("traccar", {}).get("enabled", False):
+                            self.send_to_traccar(self.sensor_data)
+                self.read_can_bus()
                 time.sleep(self.config.get("interval", 10))
             except Exception as e:
                 logging.error(f"AVSIP: Error in sensor broadcast: {e}")
@@ -123,36 +135,41 @@ class AVSIP:
                 logging.warning(f"Error querying OBD-II command {command_name}: {e}")
         return data
 
-    def handle_incoming(self, packet, interface):
-        if packet['decoded']['portNum'] == meshtastic.constants.DATA_APP:
-            decoded = packet['decoded']['payload']
-            if decoded.get("type") == "vehicle_sensor":
-                logging.info(f"AVSIP: Vehicle sensor data received: {decoded}")
+    def get_dtc_codes(self):
+        try:
+            response = self.obd_connection.query(obd.commands.GET_DTC)
+            if response and response.value:
+                return {"DTC_codes": [str(dtc) for dtc in response.value]}
+            else:
+                return {"DTC_codes": []}
+        except Exception as e:
+            logging.warning(f"Error reading DTC codes: {e}")
+            return {"DTC_codes": []}
 
-    def onConnection(self, interface, connected):
-        if connected:
-            logging.info("AVSIP: Meshtastic connected.")
-            self.start_sensor_broadcast()
-        else:
-            logging.info("AVSIP: Meshtastic disconnected.")
-            self.stop_sensor_broadcast()
+    def read_can_bus(self):
+        if self.config.get("can_enabled", False):
+            try:
+                if not self.can_bus:
+                    self.can_bus = can.interface.Bus(bustype='socketcan', channel='can0', bitrate=500000)
+                message = self.can_bus.recv(timeout=1.0)
+                if message:
+                    logging.info(f"CAN message received: {message}")
+                    # Example: self.sensor_data["CAN_data"] = message.data
+            except Exception as e:
+                logging.warning(f"Error reading CAN bus: {e}")
 
-def onReceive(packet, interface):
-    avsip.handle_incoming(packet, interface)
+    def send_to_traccar(self, data):
+        try:
+            traccar_host = self.config["traccar"]["host"]
+            traccar_port = self.config["traccar"]["port"]
+            device_id = self.config["traccar"]["device_id"]
 
-def onConnection(interface, connected):
-    avsip.onConnection(interface, connected)
+            timestamp = datetime.fromtimestamp(data['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+            speed = data['sensor_values'].get('SPEED', 0)
+            rpm = data['sensor_values'].get('RPM', 0)
+            gps = data['sensor_values'].get('gps', {})
+            latitude = gps.get('latitude', 0)
+            longitude = gps.get('longitude', 0)
+            altitude = gps.get('altitude', 0)
 
-def main():
-    parser = argparse.ArgumentParser(description="Akita Vehicle Sensor Integration Plugin")
-    parser.add_argument("--config", default="avsip_config.json", help="AVSIP config file")
-    args = parser.parse_args()
-
-    interface = meshtastic.SerialInterface()
-    global avsip
-    avsip = AVSIP(interface, args.config)
-    interface.addReceiveCallback(onReceive)
-    interface.addConnectionCallback(onConnection)
-
-if __name__ == '__main__':
-    main()
+            message = f"{device_id},{timestamp},{latitude},{longitude},{altitude},{speed},{rpm}\r\n"
