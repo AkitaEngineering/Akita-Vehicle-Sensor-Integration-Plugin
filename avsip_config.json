@@ -1,7 +1,8 @@
 {
-    "interval": 10,
+     "interval": 10,
     "meshtastic_port": 2,
     "obd_commands": ["SPEED", "RPM", "COOLANT_TEMP", "FUEL_LEVEL"],
+    "can_enabled": true,
     "mqtt": {
         "host": "mqtt.example.com",
         "port": 1883,
@@ -9,5 +10,11 @@
         "user": "mqtt_user",
         "password": "mqtt_password",
         "qos": 1
+    },
+    "traccar": {
+        "enabled": true,
+        "host": "[traccar.example.com](https://www.google.com/search?q=traccar.example.com)",
+        "port": 5000,
+        "device_id": "vehicle123"
     }
 }
