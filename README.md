@@ -43,6 +43,15 @@ AVSIP is a Meshtastic plugin that integrates OBD-II vehicle sensor data into the
     -   `user`: The MQTT username (optional).
     -   `password`: The MQTT password (optional).
     -   `qos`: The MQTT Quality of Service level (0, 1, or 2) (default: 1).
+ 
+## Command-Line Arguments
+--config: Specifies the AVSIP configuration file (default: avsip_config.json).
+
+## Dependencies
+- Meshtastic Python API
+- python-obd
+- paho-mqtt
+
 
 **Example avsip_config.json:**
 
@@ -61,13 +70,4 @@ AVSIP is a Meshtastic plugin that integrates OBD-II vehicle sensor data into the
     }
 }
 
-## Command-Line Arguments
---config: Specifies the AVSIP configuration file (default: avsip_config.json).
 
-## Dependencies
-- Meshtastic Python API
-- python-obd
-- paho-mqtt
-
-
-# Akita Engineering
