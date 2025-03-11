@@ -158,18 +158,60 @@ class AVSIP:
             except Exception as e:
                 logging.warning(f"Error reading CAN bus: {e}")
 
-    def send_to_traccar(self, data):
-        try:
-            traccar_host = self.config["traccar"]["host"]
-            traccar_port = self.config["traccar"]["port"]
-            device_id = self.config["traccar"]["device_id"]
+   def send_to_traccar(self, data):
+    try:
+        traccar_host = self.config["traccar"]["host"]
+        traccar_port = self.config["traccar"]["port"]
+        device_id = self.config["traccar"]["device_id"]
 
-            timestamp = datetime.fromtimestamp(data['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
-            speed = data['sensor_values'].get('SPEED', 0)
-            rpm = data['sensor_values'].get('RPM', 0)
-            gps = data['sensor_values'].get('gps', {})
-            latitude = gps.get('latitude', 0)
-            longitude = gps.get('longitude', 0)
-            altitude = gps.get('altitude', 0)
+        timestamp = datetime.fromtimestamp(data['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+        speed = data['sensor_values'].get('SPEED', 0)
+        rpm = data['sensor_values'].get('RPM', 0)
+        gps = data['sensor_values'].get('gps', {})
+        latitude = gps.get('latitude', 0)
+        longitude = gps.get('longitude', 0)
+        altitude = gps.get('altitude', 0)
 
-            message = f"{device_id},{timestamp},{latitude},{longitude},{altitude},{speed},{rpm}\r\n"
+        message = f"{device_id},{timestamp},{latitude},{longitude},{altitude},{speed},{rpm}\r\n"
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((traccar_host, traccar_port))
+            s.sendall(message.encode())
+            logging.info(f"AVSIP: Sent data to Traccar: {message.strip()}")
+
+    except (KeyError, ValueError, socket.error) as e:
+        logging.warning(f"AVSIP: Error sending data to Traccar: {e}")
+        
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AVSIP - Advanced Vehicle Sensor Integration Platform")
+    parser.add_argument("--config", help="Path to the configuration file", default="avsip_config.json")
+    args = parser.parse_args()
+
+    try:
+        interface = meshtastic.serial_interface.SerialInterface()
+        avsip = AVSIP(interface, config_file=args.config)
+        avsip.start_sensor_broadcast()
+
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        logging.info("AVSIP: Stopping sensor broadcast...")
+        if avsip:
+            avsip.stop_sensor_broadcast()
+        logging.info("AVSIP: Exiting.")
+
+    except Exception as e:
+        logging.error(f"AVSIP: An unexpected error occurred: {e}")
+
+    finally:
+        if avsip:
+            if avsip.mqtt_client and avsip.mqtt_client.is_connected():
+                avsip.mqtt_client.loop_stop()
+                avsip.mqtt_client.disconnect()
+            if avsip.obd_connection and avsip.obd_connection.is_connected():
+                avsip.obd_connection.close()
+            if avsip.can_bus:
+                avsip.can_bus.shutdown()
+            if interface:
+                interface.close()            
