@@ -5,14 +5,15 @@ import threading
 import time
 import json
 from queue import Queue, Empty # For potential future inter-thread communication
+from typing import Dict, Any, Optional, List # Added List for type hinting
 
 from . import config_manager
 from . import utils
 from .meshtastic_handler import MeshtasticHandler
 from .obd_handler import OBDHandler
-from .can_handler import CANHandler # Import the actual CAN handler
+from .can_handler import CANHandler
+from .mqtt_handler import MQTTHandler # Import the actual MQTT handler
 # Placeholder for actual handler imports - will be created later
-# from .mqtt_handler import MQTTHandler
 # from .traccar_handler import TraccarHandler
 
 # Initialize a module-level logger
@@ -42,8 +43,8 @@ class AVSIP:
         # --- Handlers ---
         self.meshtastic_handler: MeshtasticHandler | None = None
         self.obd_handler: OBDHandler | None = None
-        self.can_handler: CANHandler | None = None # Type hint for CANHandler
-        self.mqtt_handler = None
+        self.can_handler: CANHandler | None = None
+        self.mqtt_handler: MQTTHandler | None = None # Type hint for MQTTHandler
         self.traccar_handler = None
         
         # --- Rate Limiters ---
@@ -55,11 +56,11 @@ class AVSIP:
         # --- Threading Control ---
         self._stop_event = threading.Event()
         self._data_thread = None
-        self._handler_threads: List[threading.Thread] = [] # Store handler-managed threads
+        self._handler_threads: List[threading.Thread] = [] 
 
         # --- Data Storage ---
         self.current_sensor_data: dict = {}
-        self.data_queue = Queue(maxsize=200) # Queue for CAN data, with a max size
+        self.data_queue = Queue(maxsize=200) 
 
         self._initialize_handlers()
         
@@ -99,7 +100,11 @@ class AVSIP:
         )
         logging.getLogger("meshtastic").setLevel(logging.INFO)
         logging.getLogger("obd").setLevel(logging.INFO)
-        logging.getLogger("can").setLevel(logging.INFO) # Set python-can log level
+        logging.getLogger("can").setLevel(logging.INFO) 
+        logging.getLogger("paho.mqtt.client").setLevel(logging.WARNING) # Reduce Paho verbosity unless AVSIP is DEBUG
+        if log_level == logging.DEBUG:
+            logging.getLogger("paho.mqtt.client").setLevel(logging.DEBUG)
+
         logger.info(f"Logging configured to level: {log_level_str}")
 
 
@@ -148,9 +153,10 @@ class AVSIP:
                 self.can_handler = CANHandler(can_config, self.data_queue)
                 if self.can_handler.is_connected:
                     logger.info("CANHandler initialized and connected.")
-                    self.can_handler.start_listener() # Start its listening thread
-                    if self.can_handler._listener_thread: # Accessing protected member for list
+                    # Listener is started by CANHandler itself if connection is successful
+                    if self.can_handler._listener_thread and self.can_handler._listener_thread.is_alive():
                          self._handler_threads.append(self.can_handler._listener_thread)
+                         logger.info("CANHandler listener thread started and tracked.")
                 else:
                     logger.warning("CANHandler initialized but not connected. CAN data will not be available.")
             except Exception as e:
@@ -164,15 +170,26 @@ class AVSIP:
     def _reinitialize_dependent_handlers(self):
         """Initializes handlers that depend on the final avsip_device_id."""
         logger.info("Re-initializing device ID dependent handlers...")
+        
         # MQTT Handler
-        if self.config.get("mqtt", {}).get("enabled"):
+        mqtt_config = self.config.get("mqtt", {})
+        if mqtt_config.get("enabled"):
             if self.mqtt_handler: 
                 logger.debug("MQTT Handler instance already exists. Disconnecting before re-init.")
+                self.mqtt_handler.disconnect()
             try:
-                logger.info(f"MQTTHandler initialized with device ID {self.avsip_device_id} (placeholder).")
+                self.mqtt_handler = MQTTHandler(mqtt_config, self.avsip_device_id) # Pass final device_id
+                if self.mqtt_handler.is_connected:
+                    logger.info(f"MQTTHandler initialized and connected with device ID {self.avsip_device_id}.")
+                elif mqtt_config.get("enabled"): # Check if it was disabled by its own init logic
+                    logger.warning(f"MQTTHandler initialized for device ID {self.avsip_device_id} but failed to connect.")
+                # If MQTTHandler disables itself due to bad device_id, self.config["mqtt"]["enabled"] will be False.
             except Exception as e:
                 logger.error(f"Failed to initialize MQTTHandler: {e}", exc_info=True)
-                self.config["mqtt"]["enabled"] = False
+                self.config["mqtt"]["enabled"] = False # Ensure it's marked as disabled
+        else:
+            logger.info("MQTT component is disabled in configuration.")
+
 
         # Traccar Handler
         if self.config.get("traccar", {}).get("enabled"):
@@ -188,6 +205,7 @@ class AVSIP:
                     else:
                         logger.warning("Traccar device_id_source is 'custom_traccar_id' but no custom ID provided. Using AVSIP device ID.")
                 
+                # self.traccar_handler = TraccarHandler(self.config.get("traccar", {}), traccar_device_id)
                 logger.info(f"TraccarHandler initialized with Traccar device ID {traccar_device_id} (placeholder).")
             except Exception as e:
                 logger.error(f"Failed to initialize TraccarHandler: {e}", exc_info=True)
@@ -205,7 +223,7 @@ class AVSIP:
             "sensors": {},
             "gps": {},
             "dtcs": [],
-            "can_data": {} # Initialize can_data dictionary
+            "can_data": {} 
         }
 
         # GPS Data
@@ -232,19 +250,18 @@ class AVSIP:
             else:
                 logger.warning("OBD enabled but handler not connected.")
 
-        # CAN Data - Read from the queue populated by CANHandler's thread
+        # CAN Data
         if self.config.get("can", {}).get("enabled") and self.can_handler and self.can_handler.is_connected:
             can_messages_processed_this_cycle = 0
             try:
-                while not self.data_queue.empty(): # Process all messages currently in queue
-                    can_msg = self.data_queue.get_nowait() # {"timestamp": float, "name": str, "value": float_or_int}
+                while not self.data_queue.empty(): 
+                    can_msg = self.data_queue.get_nowait() 
                     if can_msg and isinstance(can_msg, dict) and 'name' in can_msg and 'value' in can_msg:
-                        # Store latest value for each CAN signal name
                         collected_data["can_data"][can_msg['name']] = can_msg['value']
                         can_messages_processed_this_cycle +=1
-                    self.data_queue.task_done() # Indicate item processing is complete
+                    self.data_queue.task_done() 
             except Empty:
-                pass # No new CAN data in the queue
+                pass 
             if can_messages_processed_this_cycle > 0:
                 logger.debug(f"Collected {can_messages_processed_this_cycle} CAN data items from queue: {collected_data['can_data']}")
             else:
@@ -269,19 +286,33 @@ class AVSIP:
 
         # Meshtastic Transmission
         if self.config.get("meshtastic", {}).get("enabled") and self.meshtastic_handler and self.meshtastic_handler.is_connected:
-            if self.meshtastic_handler.send_data(data):
+            if self.meshtastic_handler.send_data(data): # Send the whole aggregated data for now
                  logger.info("Data sent via Meshtastic.")
             else:
                  logger.warning("Failed to send data via Meshtastic.")
 
         # MQTT Transmission
-        if self.config.get("mqtt", {}).get("enabled") and self.mqtt_handler:
-            logger.info("Data sent via MQTT (placeholder).")
+        if self.config.get("mqtt", {}).get("enabled") and self.mqtt_handler and self.mqtt_handler.is_connected:
+            # We can publish the entire data structure to a main topic,
+            # or publish parts to different sub-topics.
+            # For simplicity, publish the whole data to a "data" sub-topic.
+            if self.mqtt_handler.publish_data(data, sub_topic="data_all"):
+                logger.info("Aggregated data sent via MQTT to 'data_all' sub-topic.")
+            else:
+                logger.warning("Failed to send aggregated data via MQTT.")
+            
+            # Example: Publishing individual sensor groups to different topics
+            # if data.get("sensors"):
+            #    self.mqtt_handler.publish_data(data["sensors"], sub_topic="sensors")
+            # if data.get("gps"):
+            #    self.mqtt_handler.publish_data(data["gps"], sub_topic="gps")
+
 
         # Traccar Transmission
         if self.config.get("traccar", {}).get("enabled") and self.traccar_handler and self.traccar_rate_limiter:
             if data.get("gps") and data["gps"].get("latitude") != 0.0 and data["gps"].get("longitude") != 0.0 : 
                 if self.traccar_rate_limiter.try_trigger():
+                    # self.traccar_handler.send_data(data) # Traccar handler needs to extract relevant fields
                     logger.info("Data sent via Traccar (placeholder).")
                 else:
                     logger.debug(f"Traccar send rate limited. Next attempt in {self.traccar_rate_limiter.time_to_next_trigger():.1f}s")
@@ -324,13 +355,15 @@ class AVSIP:
         logger.info("Starting AVSIP data loop...")
         self._stop_event.clear()
         
-        # Start handler-specific threads (like CAN listener)
-        # Note: Meshtastic library handles its own internal threads for radio comms.
+        # Ensure CAN listener is started if CAN is enabled and connected
+        # This is now handled in _initialize_handlers, but a check here could be a safeguard
         if self.can_handler and self.can_handler.is_connected:
-            logger.info("Starting CAN handler listener thread...")
-            self.can_handler.start_listener() # This was already called in _initialize_handlers if successful
-                                              # but good to ensure it's running if AVSIP is restarted.
-                                              # Redundant call to start_listener is handled by CANHandler.
+            if not self.can_handler._listener_thread or not self.can_handler._listener_thread.is_alive():
+                logger.info("CAN listener was not running, attempting to start it now.")
+                self.can_handler.start_listener()
+                if self.can_handler._listener_thread and self.can_handler._listener_thread not in self._handler_threads:
+                     self._handler_threads.append(self.can_handler._listener_thread)
+
 
         self._data_thread = threading.Thread(target=self._data_loop, name="AVSIPDataLoop")
         self._data_thread.daemon = True
@@ -340,18 +373,18 @@ class AVSIP:
     def stop(self):
         """Stops the AVSIP data collection and transmission thread and cleans up resources."""
         logger.info("Stopping AVSIP...")
-        self._stop_event.set() # Signal all loops managed by this event to stop
+        self._stop_event.set() 
 
         # Stop handler-specific threads first
-        if self.can_handler:
+        if self.can_handler: # CANHandler manages its own thread via stop_listener
             logger.info("Stopping CAN handler listener...")
-            self.can_handler.stop_listener() # Signals CAN listener thread to stop
+            self.can_handler.stop_listener() 
 
-        # Join all handler threads we manage
-        for thread in self._handler_threads:
+        # Join all handler threads we explicitly manage (if any were added beyond CAN's internal)
+        for thread in self._handler_threads: # This list should contain CAN listener thread
             if thread and thread.is_alive():
                 logger.debug(f"Waiting for handler thread {thread.name} to join...")
-                thread.join(timeout=5)
+                thread.join(timeout=5) # Give it a bit of time
                 if thread.is_alive():
                     logger.warning(f"Handler thread {thread.name} did not join in time.")
         self._handler_threads.clear()
@@ -368,9 +401,10 @@ class AVSIP:
             self.meshtastic_handler.close()
         if self.obd_handler: 
             self.obd_handler.close()
-        if self.can_handler: # Add CAN handler cleanup
-            self.can_handler.close()
-        # if self.mqtt_handler: self.mqtt_handler.disconnect()
+        if self.can_handler: 
+            self.can_handler.close() # CANHandler.close() calls stop_listener and bus.shutdown()
+        if self.mqtt_handler: # Add MQTT handler cleanup
+            self.mqtt_handler.disconnect()
 
         logger.info("AVSIP stopped.")
 
@@ -380,20 +414,21 @@ if __name__ == "__main__":
         dummy_cfg = {
             "general": {
                 "log_level": "DEBUG", 
-                "data_interval_seconds": 5, 
+                "data_interval_seconds": 10, 
                 "device_id_source": "meshtastic_node_id" 
+                # "custom_device_id": "avsip_main_test_001"
             },
             "meshtastic": { "enabled": True, "device_port": None, "data_port_num": 251 },
             "obd": { 
-                "enabled": False, # Set to True to test OBD
+                "enabled": False, 
                 "port_string": None, 
                 "commands": ["RPM", "SPEED"],
                 "connection_timeout_seconds": 30
             },
-            "can": { # Add CAN section for testing
-                "enabled": False, # Set to True to test CAN with vcan0
+            "can": { 
+                "enabled": False, 
                 "interface_type": "socketcan",
-                "channel": "vcan0", # Ensure vcan0 is up: sudo ip link set vcan0 up
+                "channel": "vcan0", 
                 "bitrate": 500000,
                 "message_definitions": [
                     {"id": "0x123", "name": "TestCANSignal", "parser": {
@@ -401,8 +436,14 @@ if __name__ == "__main__":
                         "scale": 1, "offset": 0, "is_signed": False, "byte_order": "big"
                     }}
                 ]
+            },
+            "mqtt": { # Add MQTT section for testing
+                "enabled": False, # Set to True to test MQTT
+                "host": "test.mosquitto.org", 
+                "port": 1883,
+                "topic_prefix": "vehicle/avsip_coretest",
+                "lwt_topic_suffix": "status"
             }
-            # "mqtt": {"enabled": True, "host": "test.mosquitto.org", "topic_prefix": "vehicle/avsip_test"}, 
             # "traccar": {"enabled": True, "host": "demo.traccar.org", "device_id_source": "avsip_device_id"}
         }
         with open("avsip_config.json", "w") as f:
