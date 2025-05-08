@@ -1,0 +1,104 @@
+{
+    "general": {
+        "log_level": "INFO",
+        "data_interval_seconds": 10,
+        "device_id_source": "meshtastic_node_id",
+        "custom_device_id": null
+    },
+    "meshtastic": {
+        "enabled": true,
+        "device_port": null,
+        "data_port_num": 250,
+        "connection_timeout_seconds": 15,
+        "send_retries": 2,
+        "send_retry_delay_seconds": 3
+    },
+    "obd": {
+        "enabled": false,
+        "port_string": null,
+        "baudrate": null,
+        "protocol": null,
+        "fast_commands": true,
+        "commands": [
+            "RPM",
+            "SPEED",
+            "COOLANT_TEMP",
+            "FUEL_LEVEL",
+            "STATUS"
+        ],
+        "include_dtc_codes": true,
+        "connection_retries": 3,
+        "retry_delay_seconds": 5,
+        "connection_timeout_seconds": 30
+    },
+    "can": {
+        "enabled": false,
+        "interface_type": "socketcan",
+        "channel": "can0",
+        "bitrate": 500000,
+        "message_definitions": [
+            {
+                "id": "0x123",
+                "name": "ExampleEngineSpeed",
+                "parser": {
+                    "type": "simple_scalar",
+                    "start_byte": 0,
+                    "length_bytes": 2,
+                    "scale": 0.25,
+                    "offset": 0,
+                    "is_signed": false,
+                    "byte_order": "big"
+                }
+            },
+            {
+                "id": "0x456",
+                "name": "ExampleOilPressure",
+                "parser": {
+                    "type": "simple_scalar",
+                    "start_byte": 1,
+                    "length_bytes": 1,
+                    "scale": 0.5,
+                    "offset": 0,
+                    "is_signed": false,
+                    "byte_order": "big"
+                }
+            }
+        ],
+        "connection_retries": 3,
+        "retry_delay_seconds": 5,
+        "receive_timeout_seconds": 1.0
+    },
+    "mqtt": {
+        "enabled": false,
+        "host": "localhost",
+        "port": 1883,
+        "user": null,
+        "password": null,
+        "topic_prefix": "vehicle/avsip",
+        "qos": 0,
+        "retain_messages": false,
+        "tls_enabled": false,
+        "tls_ca_certs": null,
+        "tls_certfile": null,
+        "tls_keyfile": null,
+        "lwt_topic_suffix": "status",
+        "lwt_payload_online": "online",
+        "lwt_payload_offline": "offline",
+        "lwt_qos": 0,
+        "lwt_retain": true,
+        "connection_timeout_seconds": 10,
+        "keepalive": 60
+    },
+    "traccar": {
+        "enabled": false,
+        "host": "localhost",
+        "port": 5055,
+        "device_id_source": "avsip_device_id",
+        "custom_traccar_id": null,
+        "use_http": true,
+        "http_path": "/",
+        "report_interval_seconds": 30,
+        "request_timeout_seconds": 10,
+        "convert_speed_to_knots": true
+    }
+}
