@@ -1,0 +1,14 @@
+# requirements.txt for AVSIP
+
+# Core communication libraries
+meshtastic>=2.0.0 # For Meshtastic device interaction
+obd-py>=0.7.1 # For OBD-II communication (library is named 'obd' in Python)
+paho-mqtt>=1.6.0 # For MQTT client functionality
+python-can>=4.0.0 # For CAN bus communication
+requests>=2.25.0 # For HTTP requests (used by Traccar handler)
+
+# Note: Specific versions are examples. Adjust based on compatibility needs.
+# You might need additional system dependencies for python-can depending on your interface
+# (e.g., build-essential, libsocketcan-dev on Debian/Ubuntu for SocketCAN).
+# Check the documentation for python-obd and python-can for hardware-specific requirements.
+
