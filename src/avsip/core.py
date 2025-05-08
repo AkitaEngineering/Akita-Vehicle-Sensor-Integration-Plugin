@@ -12,9 +12,8 @@ from . import utils
 from .meshtastic_handler import MeshtasticHandler
 from .obd_handler import OBDHandler
 from .can_handler import CANHandler
-from .mqtt_handler import MQTTHandler # Import the actual MQTT handler
-# Placeholder for actual handler imports - will be created later
-# from .traccar_handler import TraccarHandler
+from .mqtt_handler import MQTTHandler
+from .traccar_handler import TraccarHandler # Import the actual Traccar handler
 
 # Initialize a module-level logger
 logger = logging.getLogger(__name__)
@@ -44,14 +43,14 @@ class AVSIP:
         self.meshtastic_handler: MeshtasticHandler | None = None
         self.obd_handler: OBDHandler | None = None
         self.can_handler: CANHandler | None = None
-        self.mqtt_handler: MQTTHandler | None = None # Type hint for MQTTHandler
-        self.traccar_handler = None
+        self.mqtt_handler: MQTTHandler | None = None
+        self.traccar_handler: TraccarHandler | None = None # Type hint for TraccarHandler
         
         # --- Rate Limiters ---
         self.traccar_rate_limiter = None
         if self.config.get("traccar", {}).get("enabled"):
-            report_interval = self.config["traccar"].get("report_interval_seconds", 30)
-            self.traccar_rate_limiter = utils.RateLimiter(report_interval)
+            report_interval = self.config.get("traccar", {}).get("report_interval_seconds", 30)
+            self.traccar_rate_limiter = utils.RateLimiter(float(report_interval)) # Ensure float for RateLimiter
 
         # --- Threading Control ---
         self._stop_event = threading.Event()
@@ -93,17 +92,30 @@ class AVSIP:
         log_level_str = self.config.get("general", {}).get("log_level", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
         
+        # Clear existing handlers from the root logger to avoid duplicate messages
+        # if basicConfig has been called before (e.g. by a library or in testing)
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+
         logging.basicConfig(
             level=log_level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
-        logging.getLogger("meshtastic").setLevel(logging.INFO)
-        logging.getLogger("obd").setLevel(logging.INFO)
-        logging.getLogger("can").setLevel(logging.INFO) 
-        logging.getLogger("paho.mqtt.client").setLevel(logging.WARNING) # Reduce Paho verbosity unless AVSIP is DEBUG
+        # Set library log levels
+        # These should be set after basicConfig if basicConfig affects the root logger's level
+        # or if libraries get their own loggers that inherit from root.
+        # If AVSIP's level is DEBUG, we might want more from libraries too.
+        lib_log_level = logging.WARNING # Default for less verbose libraries
         if log_level == logging.DEBUG:
-            logging.getLogger("paho.mqtt.client").setLevel(logging.DEBUG)
+            lib_log_level = logging.INFO # Or even DEBUG for specific libraries
+
+        logging.getLogger("meshtastic").setLevel(lib_log_level if lib_log_level != logging.INFO else logging.INFO) # Meshtastic can be noisy
+        logging.getLogger("obd").setLevel(lib_log_level)
+        logging.getLogger("can").setLevel(lib_log_level) 
+        logging.getLogger("paho.mqtt.client").setLevel(lib_log_level)
+        logging.getLogger("requests").setLevel(logging.WARNING) # Requests can be verbose with INFO/DEBUG
+        logging.getLogger("urllib3").setLevel(logging.WARNING) # urllib3 (used by requests)
 
         logger.info(f"Logging configured to level: {log_level_str}")
 
@@ -154,6 +166,7 @@ class AVSIP:
                 if self.can_handler.is_connected:
                     logger.info("CANHandler initialized and connected.")
                     # Listener is started by CANHandler itself if connection is successful
+                    # We track its thread if it's created and alive.
                     if self.can_handler._listener_thread and self.can_handler._listener_thread.is_alive():
                          self._handler_threads.append(self.can_handler._listener_thread)
                          logger.info("CANHandler listener thread started and tracked.")
@@ -178,38 +191,46 @@ class AVSIP:
                 logger.debug("MQTT Handler instance already exists. Disconnecting before re-init.")
                 self.mqtt_handler.disconnect()
             try:
-                self.mqtt_handler = MQTTHandler(mqtt_config, self.avsip_device_id) # Pass final device_id
+                self.mqtt_handler = MQTTHandler(mqtt_config, self.avsip_device_id)
                 if self.mqtt_handler.is_connected:
                     logger.info(f"MQTTHandler initialized and connected with device ID {self.avsip_device_id}.")
-                elif mqtt_config.get("enabled"): # Check if it was disabled by its own init logic
+                elif mqtt_config.get("enabled"): 
                     logger.warning(f"MQTTHandler initialized for device ID {self.avsip_device_id} but failed to connect.")
-                # If MQTTHandler disables itself due to bad device_id, self.config["mqtt"]["enabled"] will be False.
             except Exception as e:
                 logger.error(f"Failed to initialize MQTTHandler: {e}", exc_info=True)
-                self.config["mqtt"]["enabled"] = False # Ensure it's marked as disabled
+                self.config["mqtt"]["enabled"] = False
         else:
             logger.info("MQTT component is disabled in configuration.")
 
-
         # Traccar Handler
-        if self.config.get("traccar", {}).get("enabled"):
+        traccar_config = self.config.get("traccar", {})
+        if traccar_config.get("enabled"):
             if self.traccar_handler:
-                 logger.debug("Traccar Handler instance already exists.")
+                 logger.debug("Traccar Handler instance already exists. No re-init needed unless config changed externally.")
             try:
-                traccar_device_id = self.avsip_device_id 
-                traccar_id_source = self.config.get("traccar",{}).get("device_id_source", "avsip_device_id")
-                if traccar_id_source == "custom_traccar_id":
-                    custom_id = self.config.get("traccar",{}).get("custom_traccar_id")
-                    if custom_id:
-                        traccar_device_id = custom_id
-                    else:
-                        logger.warning("Traccar device_id_source is 'custom_traccar_id' but no custom ID provided. Using AVSIP device ID.")
+                traccar_device_id_for_handler = self.avsip_device_id # Default
+                traccar_id_source = traccar_config.get("device_id_source", "avsip_device_id")
                 
-                # self.traccar_handler = TraccarHandler(self.config.get("traccar", {}), traccar_device_id)
-                logger.info(f"TraccarHandler initialized with Traccar device ID {traccar_device_id} (placeholder).")
+                if traccar_id_source == "custom_traccar_id":
+                    custom_id = traccar_config.get("custom_traccar_id")
+                    if custom_id:
+                        traccar_device_id_for_handler = custom_id
+                        logger.info(f"Using custom Traccar device ID: {custom_id}")
+                    else:
+                        logger.warning("Traccar device_id_source is 'custom_traccar_id' but no custom ID provided. Using AVSIP device ID as fallback for Traccar.")
+                else: # avsip_device_id or other
+                    logger.info(f"Using AVSIP device ID '{self.avsip_device_id}' for Traccar.")
+
+                self.traccar_handler = TraccarHandler(traccar_config, traccar_device_id_for_handler)
+                if self.traccar_handler.is_configured: # TraccarHandler uses is_configured
+                    logger.info(f"TraccarHandler initialized for Traccar device ID {traccar_device_id_for_handler}.")
+                elif traccar_config.get("enabled"): # Check if it was disabled by its own init logic
+                    logger.warning(f"TraccarHandler initialized for device ID {traccar_device_id_for_handler} but is not configured (e.g. missing host).")
             except Exception as e:
                 logger.error(f"Failed to initialize TraccarHandler: {e}", exc_info=True)
                 self.config["traccar"]["enabled"] = False
+        else:
+            logger.info("Traccar component is disabled in configuration.")
 
 
     def _collect_data(self) -> dict | None:
@@ -286,38 +307,34 @@ class AVSIP:
 
         # Meshtastic Transmission
         if self.config.get("meshtastic", {}).get("enabled") and self.meshtastic_handler and self.meshtastic_handler.is_connected:
-            if self.meshtastic_handler.send_data(data): # Send the whole aggregated data for now
+            if self.meshtastic_handler.send_data(data): 
                  logger.info("Data sent via Meshtastic.")
             else:
                  logger.warning("Failed to send data via Meshtastic.")
 
         # MQTT Transmission
         if self.config.get("mqtt", {}).get("enabled") and self.mqtt_handler and self.mqtt_handler.is_connected:
-            # We can publish the entire data structure to a main topic,
-            # or publish parts to different sub-topics.
-            # For simplicity, publish the whole data to a "data" sub-topic.
             if self.mqtt_handler.publish_data(data, sub_topic="data_all"):
                 logger.info("Aggregated data sent via MQTT to 'data_all' sub-topic.")
             else:
                 logger.warning("Failed to send aggregated data via MQTT.")
             
-            # Example: Publishing individual sensor groups to different topics
-            # if data.get("sensors"):
-            #    self.mqtt_handler.publish_data(data["sensors"], sub_topic="sensors")
-            # if data.get("gps"):
-            #    self.mqtt_handler.publish_data(data["gps"], sub_topic="gps")
-
-
         # Traccar Transmission
-        if self.config.get("traccar", {}).get("enabled") and self.traccar_handler and self.traccar_rate_limiter:
-            if data.get("gps") and data["gps"].get("latitude") != 0.0 and data["gps"].get("longitude") != 0.0 : 
+        if self.config.get("traccar", {}).get("enabled") and \
+           self.traccar_handler and self.traccar_handler.is_configured and \
+           self.traccar_rate_limiter:
+            # Traccar primarily needs GPS data.
+            if data.get("gps") and data["gps"].get("latitude") is not None and data["gps"].get("longitude") is not None \
+               and (data["gps"]["latitude"] != 0.0 or data["gps"]["longitude"] != 0.0): # Ensure not (0,0) which can be invalid default
                 if self.traccar_rate_limiter.try_trigger():
-                    # self.traccar_handler.send_data(data) # Traccar handler needs to extract relevant fields
-                    logger.info("Data sent via Traccar (placeholder).")
+                    if self.traccar_handler.send_data(data):
+                        logger.info("Data sent via Traccar.")
+                    else:
+                        logger.warning("Failed to send data via Traccar.")
                 else:
                     logger.debug(f"Traccar send rate limited. Next attempt in {self.traccar_rate_limiter.time_to_next_trigger():.1f}s")
             else:
-                logger.debug("Skipping Traccar transmission due to missing or invalid GPS data.")
+                logger.debug("Skipping Traccar transmission due to missing, invalid, or (0,0) GPS data.")
 
 
     def _data_loop(self):
@@ -355,13 +372,13 @@ class AVSIP:
         logger.info("Starting AVSIP data loop...")
         self._stop_event.clear()
         
-        # Ensure CAN listener is started if CAN is enabled and connected
-        # This is now handled in _initialize_handlers, but a check here could be a safeguard
         if self.can_handler and self.can_handler.is_connected:
             if not self.can_handler._listener_thread or not self.can_handler._listener_thread.is_alive():
                 logger.info("CAN listener was not running, attempting to start it now.")
-                self.can_handler.start_listener()
-                if self.can_handler._listener_thread and self.can_handler._listener_thread not in self._handler_threads:
+                self.can_handler.start_listener() # This is safe, CANHandler checks if already running
+                # Re-track the thread if it was re-created
+                if self.can_handler._listener_thread and self.can_handler._listener_thread.is_alive() and \
+                   self.can_handler._listener_thread not in self._handler_threads:
                      self._handler_threads.append(self.can_handler._listener_thread)
 
 
@@ -375,16 +392,14 @@ class AVSIP:
         logger.info("Stopping AVSIP...")
         self._stop_event.set() 
 
-        # Stop handler-specific threads first
-        if self.can_handler: # CANHandler manages its own thread via stop_listener
+        if self.can_handler: 
             logger.info("Stopping CAN handler listener...")
             self.can_handler.stop_listener() 
 
-        # Join all handler threads we explicitly manage (if any were added beyond CAN's internal)
-        for thread in self._handler_threads: # This list should contain CAN listener thread
+        for thread in self._handler_threads: 
             if thread and thread.is_alive():
                 logger.debug(f"Waiting for handler thread {thread.name} to join...")
-                thread.join(timeout=5) # Give it a bit of time
+                thread.join(timeout=5) 
                 if thread.is_alive():
                     logger.warning(f"Handler thread {thread.name} did not join in time.")
         self._handler_threads.clear()
@@ -402,9 +417,12 @@ class AVSIP:
         if self.obd_handler: 
             self.obd_handler.close()
         if self.can_handler: 
-            self.can_handler.close() # CANHandler.close() calls stop_listener and bus.shutdown()
-        if self.mqtt_handler: # Add MQTT handler cleanup
+            self.can_handler.close() 
+        if self.mqtt_handler: 
             self.mqtt_handler.disconnect()
+        if self.traccar_handler: # Add Traccar handler cleanup
+            self.traccar_handler.close()
+
 
         logger.info("AVSIP stopped.")
 
@@ -437,14 +455,20 @@ if __name__ == "__main__":
                     }}
                 ]
             },
-            "mqtt": { # Add MQTT section for testing
-                "enabled": False, # Set to True to test MQTT
+            "mqtt": { 
+                "enabled": False, 
                 "host": "test.mosquitto.org", 
                 "port": 1883,
                 "topic_prefix": "vehicle/avsip_coretest",
                 "lwt_topic_suffix": "status"
+            },
+            "traccar": { # Add Traccar section for testing
+                "enabled": False, # Set to True to test Traccar
+                "host": "localhost", # Replace with your Traccar server
+                "port": 5055,
+                "device_id_source": "custom_traccar_id", # or "avsip_device_id"
+                "custom_traccar_id": "avsip_test_traccar_01" # Must exist in Traccar
             }
-            # "traccar": {"enabled": True, "host": "demo.traccar.org", "device_id_source": "avsip_device_id"}
         }
         with open("avsip_config.json", "w") as f:
             json.dump(dummy_cfg, f, indent=2)
