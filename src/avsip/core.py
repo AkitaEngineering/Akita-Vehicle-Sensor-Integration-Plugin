@@ -9,9 +9,9 @@ from queue import Queue, Empty # For potential future inter-thread communication
 from . import config_manager
 from . import utils
 from .meshtastic_handler import MeshtasticHandler
-from .obd_handler import OBDHandler # Import the actual OBD handler
+from .obd_handler import OBDHandler
+from .can_handler import CANHandler # Import the actual CAN handler
 # Placeholder for actual handler imports - will be created later
-# from .can_handler import CANHandler
 # from .mqtt_handler import MQTTHandler
 # from .traccar_handler import TraccarHandler
 
@@ -37,12 +37,12 @@ class AVSIP:
         logger.info("Initializing AVSIP...")
         logger.debug(f"Loaded configuration: {json.dumps(self.config, indent=2)}")
 
-        self.avsip_device_id: str = "unknown_avsip_device" # Will be set by Meshtastic handler or config
+        self.avsip_device_id: str = "unknown_avsip_device"
 
         # --- Handlers ---
         self.meshtastic_handler: MeshtasticHandler | None = None
-        self.obd_handler: OBDHandler | None = None # Type hint for OBDHandler
-        self.can_handler = None
+        self.obd_handler: OBDHandler | None = None
+        self.can_handler: CANHandler | None = None # Type hint for CANHandler
         self.mqtt_handler = None
         self.traccar_handler = None
         
@@ -52,14 +52,14 @@ class AVSIP:
             report_interval = self.config["traccar"].get("report_interval_seconds", 30)
             self.traccar_rate_limiter = utils.RateLimiter(report_interval)
 
-
         # --- Threading Control ---
         self._stop_event = threading.Event()
         self._data_thread = None
+        self._handler_threads: List[threading.Thread] = [] # Store handler-managed threads
 
         # --- Data Storage ---
         self.current_sensor_data: dict = {}
-        self.data_queue = Queue()
+        self.data_queue = Queue(maxsize=200) # Queue for CAN data, with a max size
 
         self._initialize_handlers()
         
@@ -72,13 +72,13 @@ class AVSIP:
                 retrieved_id = self.meshtastic_handler.get_device_id()
                 if retrieved_id:
                     self.avsip_device_id = retrieved_id
-                else: # Handler connected but no ID, or ID was already 'unknown_avsip_device'
+                else:
                     logger.error("Failed to get AVSIP device ID from Meshtastic. Using fallback.")
                     self.avsip_device_id = f"fallback_{int(time.time())}"
-            else: # Meshtastic not enabled or not connected
+            else:
                 logger.warning(f"Configured to use Meshtastic Node ID, but handler not available/connected. Using fallback.")
                 self.avsip_device_id = f"fallback_{int(time.time())}"
-        else: # Unknown source
+        else:
             logger.warning(f"Unknown device_id_source '{id_source}'. Using fallback.")
             self.avsip_device_id = f"fallback_{int(time.time())}"
         
@@ -98,7 +98,8 @@ class AVSIP:
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         logging.getLogger("meshtastic").setLevel(logging.INFO)
-        logging.getLogger("obd").setLevel(logging.INFO) # Set python-obd log level
+        logging.getLogger("obd").setLevel(logging.INFO)
+        logging.getLogger("can").setLevel(logging.INFO) # Set python-can log level
         logger.info(f"Logging configured to level: {log_level_str}")
 
 
@@ -112,7 +113,6 @@ class AVSIP:
             try:
                 self.meshtastic_handler = MeshtasticHandler(meshtastic_config)
                 if self.meshtastic_handler.is_connected:
-                    # Tentative ID set here, will be finalized after this method
                     tentative_id = self.meshtastic_handler.get_device_id()
                     if tentative_id:
                         self.avsip_device_id = tentative_id 
@@ -130,28 +130,34 @@ class AVSIP:
         obd_config = self.config.get("obd", {})
         if obd_config.get("enabled"):
             try:
-                self.obd_handler = OBDHandler(obd_config) # Instantiate OBDHandler
+                self.obd_handler = OBDHandler(obd_config)
                 if self.obd_handler.is_connected:
                     logger.info("OBDHandler initialized and connected.")
                 else:
-                    logger.warning("OBDHandler initialized but not connected. OBD features may be unavailable.")
-                    # Optionally disable OBD if connection failed critically, or let it retry internally
-                    # For now, we assume OBDHandler handles its connection state.
+                    logger.warning("OBDHandler initialized but not connected.")
             except Exception as e:
                 logger.error(f"Failed to initialize OBDHandler: {e}", exc_info=True)
-                self.config["obd"]["enabled"] = False # Disable if init fails catastrophically
+                self.config["obd"]["enabled"] = False
         else:
             logger.info("OBD component is disabled in configuration.")
 
-
         # CAN Handler
-        if self.config.get("can", {}).get("enabled"):
+        can_config = self.config.get("can", {})
+        if can_config.get("enabled"):
             try:
-                # self.can_handler = CANHandler(self.config.get("can", {}), self.data_queue)
-                logger.info("CANHandler initialized (placeholder).")
+                self.can_handler = CANHandler(can_config, self.data_queue)
+                if self.can_handler.is_connected:
+                    logger.info("CANHandler initialized and connected.")
+                    self.can_handler.start_listener() # Start its listening thread
+                    if self.can_handler._listener_thread: # Accessing protected member for list
+                         self._handler_threads.append(self.can_handler._listener_thread)
+                else:
+                    logger.warning("CANHandler initialized but not connected. CAN data will not be available.")
             except Exception as e:
                 logger.error(f"Failed to initialize CANHandler: {e}", exc_info=True)
                 self.config["can"]["enabled"] = False
+        else:
+            logger.info("CAN component is disabled in configuration.")
         
         logger.info("Handler initialization (first pass) complete.")
 
@@ -162,9 +168,7 @@ class AVSIP:
         if self.config.get("mqtt", {}).get("enabled"):
             if self.mqtt_handler: 
                 logger.debug("MQTT Handler instance already exists. Disconnecting before re-init.")
-                # self.mqtt_handler.disconnect() 
             try:
-                # self.mqtt_handler = MQTTHandler(self.config.get("mqtt", {}), self.avsip_device_id)
                 logger.info(f"MQTTHandler initialized with device ID {self.avsip_device_id} (placeholder).")
             except Exception as e:
                 logger.error(f"Failed to initialize MQTTHandler: {e}", exc_info=True)
@@ -184,7 +188,6 @@ class AVSIP:
                     else:
                         logger.warning("Traccar device_id_source is 'custom_traccar_id' but no custom ID provided. Using AVSIP device ID.")
                 
-                # self.traccar_handler = TraccarHandler(self.config.get("traccar", {}), traccar_device_id)
                 logger.info(f"TraccarHandler initialized with Traccar device ID {traccar_device_id} (placeholder).")
             except Exception as e:
                 logger.error(f"Failed to initialize TraccarHandler: {e}", exc_info=True)
@@ -202,7 +205,7 @@ class AVSIP:
             "sensors": {},
             "gps": {},
             "dtcs": [],
-            "can_data": {}
+            "can_data": {} # Initialize can_data dictionary
         }
 
         # GPS Data
@@ -216,7 +219,6 @@ class AVSIP:
         elif self.config.get("meshtastic",{}).get("enabled"):
             logger.debug("Meshtastic enabled but handler not available or not connected for GPS.")
 
-
         # OBD Data
         if self.config.get("obd", {}).get("enabled") and self.obd_handler:
             if self.obd_handler.is_connected:
@@ -228,16 +230,25 @@ class AVSIP:
                     collected_data["dtcs"] = dtc_list
                     logger.debug(f"OBD DTCs collected: {dtc_list}")
             else:
-                logger.warning("OBD enabled but handler not connected. Attempting to reconnect OBD.")
-                # Potentially add a specific reconnect call or rely on OBDHandler's internal logic if it has periodic retries.
-                # For now, OBDHandler tries to connect on init. If it fails, it stays disconnected until AVSIP restarts.
-                # A more robust system might have obd_handler.ensure_connected() or similar.
-                # self.obd_handler._connect() # Avoid direct call to private method if possible.
+                logger.warning("OBD enabled but handler not connected.")
 
-        # CAN Data
-        if self.config.get("can", {}).get("enabled") and self.can_handler:
-            collected_data["can_data"]["oil_pressure_psi"] = 60 # Placeholder
-            logger.debug("Collected CAN data (placeholder).")
+        # CAN Data - Read from the queue populated by CANHandler's thread
+        if self.config.get("can", {}).get("enabled") and self.can_handler and self.can_handler.is_connected:
+            can_messages_processed_this_cycle = 0
+            try:
+                while not self.data_queue.empty(): # Process all messages currently in queue
+                    can_msg = self.data_queue.get_nowait() # {"timestamp": float, "name": str, "value": float_or_int}
+                    if can_msg and isinstance(can_msg, dict) and 'name' in can_msg and 'value' in can_msg:
+                        # Store latest value for each CAN signal name
+                        collected_data["can_data"][can_msg['name']] = can_msg['value']
+                        can_messages_processed_this_cycle +=1
+                    self.data_queue.task_done() # Indicate item processing is complete
+            except Empty:
+                pass # No new CAN data in the queue
+            if can_messages_processed_this_cycle > 0:
+                logger.debug(f"Collected {can_messages_processed_this_cycle} CAN data items from queue: {collected_data['can_data']}")
+            else:
+                logger.debug("No new CAN data in queue this cycle.")
 
         if collected_data["sensors"] or collected_data["gps"] or collected_data["dtcs"] or collected_data["can_data"]:
             self.current_sensor_data = collected_data
@@ -313,6 +324,14 @@ class AVSIP:
         logger.info("Starting AVSIP data loop...")
         self._stop_event.clear()
         
+        # Start handler-specific threads (like CAN listener)
+        # Note: Meshtastic library handles its own internal threads for radio comms.
+        if self.can_handler and self.can_handler.is_connected:
+            logger.info("Starting CAN handler listener thread...")
+            self.can_handler.start_listener() # This was already called in _initialize_handlers if successful
+                                              # but good to ensure it's running if AVSIP is restarted.
+                                              # Redundant call to start_listener is handled by CANHandler.
+
         self._data_thread = threading.Thread(target=self._data_loop, name="AVSIPDataLoop")
         self._data_thread.daemon = True
         self._data_thread.start()
@@ -321,7 +340,22 @@ class AVSIP:
     def stop(self):
         """Stops the AVSIP data collection and transmission thread and cleans up resources."""
         logger.info("Stopping AVSIP...")
-        self._stop_event.set()
+        self._stop_event.set() # Signal all loops managed by this event to stop
+
+        # Stop handler-specific threads first
+        if self.can_handler:
+            logger.info("Stopping CAN handler listener...")
+            self.can_handler.stop_listener() # Signals CAN listener thread to stop
+
+        # Join all handler threads we manage
+        for thread in self._handler_threads:
+            if thread and thread.is_alive():
+                logger.debug(f"Waiting for handler thread {thread.name} to join...")
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    logger.warning(f"Handler thread {thread.name} did not join in time.")
+        self._handler_threads.clear()
+
 
         if self._data_thread is not None and self._data_thread.is_alive():
             logger.debug("Waiting for data loop thread to join...")
@@ -332,10 +366,11 @@ class AVSIP:
         logger.info("Cleaning up handlers...")
         if self.meshtastic_handler:
             self.meshtastic_handler.close()
-        if self.obd_handler: # Add OBD handler cleanup
+        if self.obd_handler: 
             self.obd_handler.close()
+        if self.can_handler: # Add CAN handler cleanup
+            self.can_handler.close()
         # if self.mqtt_handler: self.mqtt_handler.disconnect()
-        # if self.can_handler: self.can_handler.stop() 
 
         logger.info("AVSIP stopped.")
 
@@ -345,27 +380,34 @@ if __name__ == "__main__":
         dummy_cfg = {
             "general": {
                 "log_level": "DEBUG", 
-                "data_interval_seconds": 10, # Increased for OBD testing
+                "data_interval_seconds": 5, 
                 "device_id_source": "meshtastic_node_id" 
             },
-            "meshtastic": {
-                "enabled": True,
-                "device_port": None, 
-                "data_port_num": 251
+            "meshtastic": { "enabled": True, "device_port": None, "data_port_num": 251 },
+            "obd": { 
+                "enabled": False, # Set to True to test OBD
+                "port_string": None, 
+                "commands": ["RPM", "SPEED"],
+                "connection_timeout_seconds": 30
             },
-            "obd": { # Add OBD section for testing
-                "enabled": True, 
-                "port_string": None, # User needs to set this or have adapter auto-detectable
-                "commands": ["RPM", "SPEED", "COOLANT_TEMP"],
-                "include_dtc_codes": True,
-                "connection_timeout_seconds": 45
+            "can": { # Add CAN section for testing
+                "enabled": False, # Set to True to test CAN with vcan0
+                "interface_type": "socketcan",
+                "channel": "vcan0", # Ensure vcan0 is up: sudo ip link set vcan0 up
+                "bitrate": 500000,
+                "message_definitions": [
+                    {"id": "0x123", "name": "TestCANSignal", "parser": {
+                        "type": "simple_scalar", "start_byte": 0, "length_bytes": 1,
+                        "scale": 1, "offset": 0, "is_signed": False, "byte_order": "big"
+                    }}
+                ]
             }
             # "mqtt": {"enabled": True, "host": "test.mosquitto.org", "topic_prefix": "vehicle/avsip_test"}, 
             # "traccar": {"enabled": True, "host": "demo.traccar.org", "device_id_source": "avsip_device_id"}
         }
         with open("avsip_config.json", "w") as f:
             json.dump(dummy_cfg, f, indent=2)
-        print("Created a dummy avsip_config.json for testing core.py. Please ensure Meshtastic and/or OBD adapter are connected and configured.")
+        print("Created a dummy avsip_config.json for testing core.py. Please ensure hardware/virtual interfaces are set up.")
 
     avsip_app = None
     try:
