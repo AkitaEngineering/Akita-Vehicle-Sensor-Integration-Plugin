@@ -1,0 +1,77 @@
+# .github/workflows/python_ci.yml
+
+name: Python CI for AVSIP
+
+on:
+  push:
+    branches: [ main, develop ] # Or your primary development branches
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11"] # Specify Python versions to test against
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        # Install development/testing dependencies if you have a separate file or list them here
+        pip install flake8 pytest black isort # Example dev tools
+
+    - name: Lint with Flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Format with Black (check only)
+      run: |
+        black --check .
+
+    - name: Sort imports with isort (check only)
+      run: |
+        isort --check-only .
+
+    # - name: Test with Pytest (Uncomment and adapt if you have tests)
+    #   run: |
+    #     pytest tests/
+
+# Example placeholder for future deployment or build steps
+#  build:
+#    needs: lint-and-test # Depends on the lint-and-test job succeeding
+#    runs-on: ubuntu-latest
+#    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Example: only run on push to main
+#    steps:
+#    - name: Checkout repository
+#      uses: actions/checkout@v3
+#    - name: Set up Python
+#      uses: actions/setup-python@v4
+#      with:
+#        python-version: '3.9' # Or your target Python version for build
+#    - name: Install dependencies
+#      run: |
+#        python -m pip install --upgrade pip
+#        pip install -r requirements.txt
+#        # Potentially install build tools like setuptools, wheel
+#    - name: Build package (Example, if you have a setup.py)
+#      run: |
+#        python setup.py sdist bdist_wheel
+#    - name: Upload artifact (Example)
+#      uses: actions/upload-artifact@v3
+#      with:
+#        name: python-package
+#        path: dist/*
