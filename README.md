@@ -1,10 +1,5 @@
 # Akita Vehicle Sensor Integration Plugin (AVSIP)
 
-**License:** [GPLv3](https://www.gnu.org/licenses/gpl-3.0.en.html)
-**Organization:** Akita Engineering
-**Website:** [www.akitaengineering.com](http://www.akitaengineering.com)
-**Project Repository:** [AkitaEngineering/Akita-Vehicle-Sensor-Integration-Plugin](https://github.com/AkitaEngineering/Akita-Vehicle-Sensor-Integration-Plugin)
-
 AVSIP is a comprehensive vehicle telemetry system designed to gather and transmit sensor data from various sources, including OBD-II, CAN bus, and GPS, across multiple communication channels such as Meshtastic and MQTT. It also provides seamless integration with Traccar for vehicle tracking.
 
 This plugin is tailored for enhanced performance, robustness, and is suitable for both hobbyist and commercial vehicle applications.
@@ -75,3 +70,9 @@ Contributions are highly welcome! Whether it's bug reports, feature requests, do
 ## License
 
 This project is licensed under the GNU General Public License v3.0. See the [LICENSE](./LICENSE) file for full details.
+
+
+**License:** [GPLv3](https://www.gnu.org/licenses/gpl-3.0.en.html)
+**Organization:** Akita Engineering
+**Website:** [www.akitaengineering.com](http://www.akitaengineering.com)
+**Project Repository:** [AkitaEngineering/Akita-Vehicle-Sensor-Integration-Plugin](https://github.com/AkitaEngineering/Akita-Vehicle-Sensor-Integration-Plugin)
