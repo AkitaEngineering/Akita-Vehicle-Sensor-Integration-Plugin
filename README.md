@@ -39,7 +39,7 @@ This plugin is tailored for enhanced performance, robustness, and is suitable fo
 
 2.  **Installation:**
     ```bash
-    git clone [https://github.com/AkitaEngineering/Akita-Vehicle-Sensor-Integration-Plugin.git](https://github.com/AkitaEngineering/Akita-Vehicle-Sensor-Integration-Plugin.git)
+    git clone https://github.com/AkitaEngineering/Akita-Vehicle-Sensor-Integration-Plugin.git
     cd Akita-Vehicle-Sensor-Integration-Plugin
     pip install -r requirements.txt
     ```
