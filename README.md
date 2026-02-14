@@ -57,6 +57,25 @@ This plugin is tailored for enhanced performance, robustness, and is suitable fo
         ```
     * To stop the script, press `Ctrl+C`.
 
+    ## License
+
+    - **License:** This project is distributed under the GNU General Public License v3.0 or later. See the `LICENSE` file for the full license text and terms.
+
+    ## Running Tests
+
+    - Run the unit test suite with:
+
+    ```bash
+    python -m pytest -q
+    ```
+
+    ## Contributing
+
+    - Contributions are welcome via issues and pull requests. Please run the test suite and follow existing code style when submitting changes. Include tests for new features or bug fixes.
+
+    ## Continuous Integration
+
+    - The repository includes tests and should run in CI. Consider adding GitHub Actions for Python linting (`isort`, `black`) and `pytest` if you enable CI for this repo.
 ## Documentation
 
 For detailed information on installation, configuration, specific integrations, troubleshooting, and development, please refer to the [**Full AVSIP Documentation**](./docs/index.md).
