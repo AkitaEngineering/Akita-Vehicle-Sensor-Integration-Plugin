@@ -94,19 +94,18 @@ class TestCANHandler(unittest.TestCase):
         }
         
         logging.disable(logging.NOTSET) # Check logs
-        with self.assertLogs(level='ERROR') as cm_err: # Expect errors for failed attempts
-             with self.assertLogs(level='INFO') as cm_info: # Expect info for retries/success
-                 handler = CANHandler(config, self.data_queue)
+        with self.assertLogs(level='INFO') as cm: # Capture INFO+ and ERROR+ messages
+            handler = CANHandler(config, self.data_queue)
         logging.disable(logging.CRITICAL)
 
         self.assertTrue(handler.is_connected)
         self.assertEqual(MockCanBus.call_count, 3)
-        self.assertTrue(any("Connection Error 1" in log_msg for log_msg in cm_err.output))
-        self.assertTrue(any("Connection Error 2" in log_msg for log_msg in cm_err.output))
-        self.assertTrue(any("Retrying CAN connection" in log_msg for log_msg in cm_info.output))
-        self.assertTrue(any("Successfully connected to CAN bus" in log_msg for log_msg in cm_info.output))
+        self.assertTrue(any("Connection Error 1" in log_msg for log_msg in cm.output))
+        self.assertTrue(any("Connection Error 2" in log_msg for log_msg in cm.output))
+        self.assertTrue(any("Retrying CAN connection" in log_msg for log_msg in cm.output))
+        self.assertTrue(any("Successfully connected to CAN bus" in log_msg for log_msg in cm.output))
         # Check shutdown wasn't called on the final successful mock instance
-        self.assertFalse(MockCanBus.side_effect[2].shutdown.called)
+        self.assertFalse(handler.bus.shutdown.called)
 
 
     @patch('avsip.can_handler.can.interface.Bus')

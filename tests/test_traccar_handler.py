@@ -114,7 +114,8 @@ class TestTraccarHandler(unittest.TestCase):
         self.assertEqual(payload["lat"], 40.1)
         self.assertEqual(payload["lon"], -74.2)
         self.assertEqual(payload["altitude"], 50)
-        self.assertAlmostEqual(payload["speed"], 10.0 * 1.94384) # Check knots conversion
+        # Handler rounds speed to 2 decimal places; compare accordingly
+        self.assertAlmostEqual(payload["speed"], round(10.0 * 1.94384, 2)) # Check knots conversion (rounded to 2 dp)
         self.assertEqual(payload["bearing"], 180)
         self.assertEqual(payload["hdop"], 1.5)
         self.assertEqual(payload["rpm"], 2000)

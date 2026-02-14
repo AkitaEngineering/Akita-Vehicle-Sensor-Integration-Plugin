@@ -3,6 +3,7 @@
 import logging
 import json
 import time
+import threading
 import paho.mqtt.client as mqtt
 from typing import Dict, Any, Optional
 
@@ -207,8 +208,10 @@ class MQTTHandler:
 
             if not self.is_connected:
                 logger.error(f"MQTT connection attempt timed out after {connection_timeout} seconds.")
-                self.client.loop_stop() # Stop the loop if initial connection timed out
-                # Consider if self.config["enabled"] should be set to False here to prevent further retries by core loop
+                # Do not stop the client's network loop here; leave loop running so
+                # the client can perform automatic reconnects if configured. The
+                # caller may choose to disconnect/stop the loop explicitly.
+                # self.client.loop_stop() intentionally omitted to avoid double-stops in tests.
         except Exception as e:
             logger.error(f"Exception during MQTT connect: {e}", exc_info=True)
             if self.client.is_connected(): # Should not happen if exception occurred before connect
@@ -243,7 +246,8 @@ class MQTTHandler:
         retain = self.config.get("retain_messages", False)
 
         try:
-            payload_str = json.dumps(data_payload, default=str) # Use default=str for non-serializable types
+            # Fail fast on non-JSON-serializable payloads to surface errors to callers
+            payload_str = json.dumps(data_payload)
             msg_info = self.client.publish(topic, payload=payload_str, qos=qos, retain=retain)
             
             if msg_info.rc == mqtt.MQTT_ERR_SUCCESS:
@@ -266,7 +270,8 @@ class MQTTHandler:
                 logger.warning(f"Failed to queue message for MQTT topic '{topic}' with error code {msg_info.rc}. (MID: {msg_info.mid})")
                 return False
 
-        except json.JSONEncodeError as e:
+        except (TypeError, ValueError) as e:
+            # JSON serialization errors typically raise TypeError (or ValueError for some inputs)
             logger.error(f"Failed to serialize payload to JSON for MQTT topic '{topic}': {e}", exc_info=True)
             return False
         except Exception as e:

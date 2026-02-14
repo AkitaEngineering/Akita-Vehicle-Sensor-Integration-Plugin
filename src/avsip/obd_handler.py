@@ -111,13 +111,38 @@ class OBDHandler:
 
         configured_command_names = self.config.get("commands", [])
         self.supported_commands = [] # Reset
-        
+
         logger.info("Checking for supported OBD-II commands...")
-        # Query for the list of supported commands from the ECU
-        # This itself is an OBD command (e.g., PID 00 for mode 01)
-        # The python-obd library handles this when we query obd.commands
-        
-        available_obd_commands = {cmd.name: cmd for cmd in obd.commands.PIDS[1]} # Mode 01 PIDs
+
+        # If no commands are configured, skip trying to interrogate the library's
+        # command index which can vary across python-obd versions and cause
+        # AttributeErrors during tests or on some platforms.
+        if not configured_command_names:
+            logger.debug("No OBD commands configured; skipping supported-commands check.")
+            return
+
+        # Build a map of available commands in a robust way:
+        # 1) Prefer the PIDS table (mode 01) if available
+        # 2) Fallback to scanning the obd.commands module attributes for command objects
+        available_obd_commands: Dict[str, Any] = {}
+
+        try:
+            pids_table = getattr(obd.commands, 'PIDS', {})
+            for cmd in pids_table.get(1, []) or []:
+                if hasattr(cmd, 'name'):
+                    available_obd_commands[cmd.name] = cmd
+        except Exception:
+            # Ignore issues reading PIDS; we'll try attribute-based discovery next
+            pass
+
+        # Fallback: inspect attributes on obd.commands for named command objects
+        for attr in dir(obd.commands):
+            try:
+                obj = getattr(obd.commands, attr)
+                if hasattr(obj, 'name'):
+                    available_obd_commands[getattr(obj, 'name')] = obj
+            except Exception:
+                continue
 
         for cmd_name in configured_command_names:
             actual_cmd_name = OBD_COMMAND_MAP.get(cmd_name.lower(), cmd_name.upper())
@@ -131,7 +156,7 @@ class OBDHandler:
                     logger.warning(f"Command '{actual_cmd_name}' configured but NOT supported by vehicle.")
             else:
                 logger.warning(f"Command '{actual_cmd_name}' (from '{cmd_name}') is not a recognized python-obd command name.")
-        
+
         if not self.supported_commands:
             logger.warning("No configured OBD-II commands are supported by the vehicle or recognized by the library.")
         else:

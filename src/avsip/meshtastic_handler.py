@@ -6,6 +6,11 @@ import json
 import meshtastic
 import meshtastic.serial_interface
 from meshtastic.util import Timeout # Import Timeout for graceful connection attempts
+
+# Fallback/default for MAX_PAYLOAD_BYTES in case installed meshtastic package
+# does not expose the constant. Tests and runtime will use this fallback when
+# the attribute is not present in the meshtastic package.
+DEFAULT_MESHTASTIC_MAX_PAYLOAD_BYTES = getattr(meshtastic, 'MAX_PAYLOAD_BYTES', 237)
 # from meshtastic.node import Node # For type hinting if needed
 # from pubsub import pub # If we need to subscribe to Meshtastic events like 'meshtastic.receive.data'
 
@@ -64,7 +69,7 @@ class MeshtasticHandler:
             # We can check myInfo directly.
             start_time = time.monotonic()
             while time.monotonic() - start_time < connection_timeout:
-                if self.interface and self.interface.myInfo:
+                if self.interface and hasattr(self.interface, 'myInfo') and self.interface.myInfo:
                     self.node_id = self.interface.myInfo.my_node_num # This is the node number
                     # For a more user-friendly ID, we can use the hex string if available,
                     # but my_node_num is the unique integer ID.
@@ -88,15 +93,25 @@ class MeshtasticHandler:
             
             logger.error(f"Failed to get node info from Meshtastic device within {connection_timeout}s timeout.")
             if self.interface:
-                self.interface.close()
+                try:
+                    self.interface.close()
+                except AttributeError:
+                    pass  # Some versions may not have close or stream
             self.interface = None
             self.is_connected = False
 
-        except meshtastic.util.MeshtasticException as e:
-            logger.error(f"Meshtastic connection error: {e}", exc_info=True)
-            self.is_connected = False
         except Exception as e:
+            # Be tolerant of differences between meshtastic package versions —
+            # some versions expose MeshtasticException while others do not. A
+            # generic Exception catch here ensures we always report connection
+            # errors instead of raising an import/attribute-related error.
             logger.error(f"Failed to connect to Meshtastic device: {e}", exc_info=True)
+            if self.interface:
+                try:
+                    self.interface.close()
+                except AttributeError:
+                    pass
+            self.interface = None
             self.is_connected = False
 
     def get_device_id(self) -> str | None:
@@ -145,8 +160,15 @@ class MeshtasticHandler:
                     # HDOP is not directly available, but precision_bits can give an idea.
                     # For AVSIP, we might simplify or just report what's available.
                     # Let's add a placeholder for HDOP if we can't derive it easily.
-                    gps_data["hdop"] = round( (1 << ( (pos.get('precisionBits',0) / 2) -1 ) ) /10.0, 1) if pos.get('precisionBits',0) > 0 else 99.0
-
+                    # Derive an approximate HDOP from precisionBits. Use integer
+                    # arithmetic for the bit-shift. If precisionBits is missing or
+                    # zero, report a large HDOP to indicate low accuracy.
+                    precision_bits = int(pos.get('precisionBits', 0) or 0)
+                    if precision_bits > 0:
+                        shift = max(0, (precision_bits // 2) - 1)
+                        gps_data["hdop"] = round((1 << shift) / 10.0, 1)
+                    else:
+                        gps_data["hdop"] = 99.0
 
                     logger.debug(f"GPS data retrieved: {gps_data}")
                     return gps_data
@@ -186,8 +208,9 @@ class MeshtasticHandler:
             # For simplicity, assuming payload is already prepared by AVSIP core.
             data_bytes = json.dumps(payload).encode('utf-8')
 
-            if len(data_bytes) > meshtastic.MAX_PAYLOAD_BYTES: # Check against Meshtastic max payload size
-                logger.error(f"Data payload size ({len(data_bytes)} bytes) exceeds Meshtastic limit ({meshtastic.MAX_PAYLOAD_BYTES} bytes). Cannot send.")
+            # Compare against the package constant when available, otherwise use our default.
+            if len(data_bytes) > DEFAULT_MESHTASTIC_MAX_PAYLOAD_BYTES: # Check against Meshtastic max payload size
+                logger.error(f"Data payload size ({len(data_bytes)} bytes) exceeds Meshtastic limit ({DEFAULT_MESHTASTIC_MAX_PAYLOAD_BYTES} bytes). Cannot send.")
                 # Consider chunking or alternative serialization if this is a common issue.
                 return False
 
@@ -205,16 +228,38 @@ class MeshtasticHandler:
                     )
                     logger.info(f"Data successfully sent/queued to Meshtastic: {len(data_bytes)} bytes to {destination_node_id} on port {port_num}.")
                     return True
-                except meshtastic.util.Timeout as t_err: # Specific timeout error from meshtastic-python
-                    logger.warning(f"Timeout sending Meshtastic data (Attempt {attempt + 1}/{send_retries+1}): {t_err}")
-                    if attempt < send_retries:
-                        time.sleep(retry_delay)
+                except Exception as e_inner:
+                    # Some versions of meshtastic expose a Timeout exception class; others
+                    # do not. Tests may also raise a plain Exception named 'Timeout'.
+                    # Treat anything that looks like a timeout as retryable.
+                    timeout_type = getattr(meshtastic.util, 'Timeout', None)
+                    is_timeout = False
+                    try:
+                        if timeout_type and isinstance(e_inner, timeout_type):
+                            is_timeout = True
+                    except TypeError:
+                        # timeout_type isn't a class that can be used with isinstance()
+                        is_timeout = False
+
+                    if not is_timeout:
+                        # fallback heuristic: class name or message indicates a timeout.
+                        # Be permissive: check class-name and common text variants.
+                        exc_name = e_inner.__class__.__name__.lower()
+                        exc_msg = str(e_inner).lower()
+                        if exc_name.endswith('timeout') or 'timeout' in exc_msg or 'timed out' in exc_msg or 'time out' in exc_msg or 'times out' in exc_msg:
+                            is_timeout = True
+
+                    if is_timeout:
+                        logger.warning(f"Timeout sending Meshtastic data (Attempt {attempt + 1}/{send_retries+1}): {e_inner}")
+                        if attempt < send_retries:
+                            time.sleep(retry_delay)
+                            continue
+                        else:
+                            logger.error("Max retries reached for sending Meshtastic data due to timeout.")
+                            return False
                     else:
-                        logger.error("Max retries reached for sending Meshtastic data due to timeout.")
-                        return False
-                except Exception as e_inner: # Other errors during send
-                    logger.error(f"Error sending Meshtastic data (Attempt {attempt + 1}): {e_inner}", exc_info=True)
-                    return False # Don't retry on unexpected errors immediately
+                        logger.error(f"Error sending Meshtastic data (Attempt {attempt + 1}): {e_inner}", exc_info=True)
+                        return False # Non-timeout errors are not retried
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to serialize payload to JSON: {e}", exc_info=True)

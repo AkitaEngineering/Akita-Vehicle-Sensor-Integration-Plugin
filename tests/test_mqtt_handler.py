@@ -238,7 +238,7 @@ class TestMQTTHandler(unittest.TestCase):
 
         self.assertTrue(result)
         expected_topic = f"avsip/pub/{device_id}/measurements"
-        expected_payload_str = json.dumps(payload, default=str)
+        expected_payload_str = json.dumps(payload)
         self.mock_mqtt_client_instance.publish.assert_called_once_with(
             expected_topic, payload=expected_payload_str, qos=0, retain=False
         )

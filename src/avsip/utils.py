@@ -21,6 +21,10 @@ def get_safe_nested_dict_value(data_dict: Dict, keys: list[str], default: Option
     """
     if not isinstance(data_dict, dict):
         return default
+    # Treat an empty keys list as an invalid path to be consistent with caller
+    if not keys:
+        return default
+
     temp_dict = data_dict
     for key in keys:
         if isinstance(temp_dict, dict) and key in temp_dict:
@@ -42,7 +46,8 @@ def kph_to_knots(kph: Union[float, int]) -> float:
     if not isinstance(kph, (float, int)):
         logger.warning(f"Invalid type for kph_to_knots: {type(kph)}. Returning 0.0.")
         return 0.0
-    return kph * 0.539957
+    # Use a more precise conversion factor (1 knot = 1.852 km/h)
+    return kph * (1.0 / 1.852)
 
 def mph_to_knots(mph: Union[float, int]) -> float:
     """
@@ -57,7 +62,8 @@ def mph_to_knots(mph: Union[float, int]) -> float:
     if not isinstance(mph, (float, int)):
         logger.warning(f"Invalid type for mph_to_knots: {type(mph)}. Returning 0.0.")
         return 0.0
-    return mph * 0.868976
+    # Use a more precise conversion factor for MPH to knots
+    return mph * 0.8689762419006485
 
 def clean_sensor_name(name: str) -> str:
     """

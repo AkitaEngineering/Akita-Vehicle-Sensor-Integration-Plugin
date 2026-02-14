@@ -5,7 +5,7 @@ import threading
 import time
 import json
 from queue import Queue, Empty # For potential future inter-thread communication
-from typing import Dict, Any, Optional, List # Added List for type hinting
+from typing import List # Added List for type hinting
 
 from . import config_manager
 from . import utils

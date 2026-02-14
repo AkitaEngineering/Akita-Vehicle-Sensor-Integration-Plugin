@@ -114,9 +114,9 @@ class TestUtils(unittest.TestCase):
         self.assertTrue(limiter.try_trigger(), "Trigger after interval completion should be allowed.")
         self.assertAlmostEqual(limiter.time_since_last_trigger(), 0.0, delta=0.01)
 
-        # Test reset
-        self.assertTrue(limiter.try_trigger()) # Trigger once
-        self.assertFalse(limiter.try_trigger()) # Should be limited
+        # Test reset: ensure limiter blocks immediately after a trigger,
+        # and that reset() allows an immediate trigger again.
+        self.assertFalse(limiter.try_trigger()) # Should be limited immediately after previous trigger
         limiter.reset()
         self.assertTrue(limiter.try_trigger(), "Trigger after reset should be allowed.")
 

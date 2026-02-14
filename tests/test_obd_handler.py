@@ -112,7 +112,9 @@ class TestOBDHandler(unittest.TestCase):
 
         mock_conn_fail2 = MagicMock()
         mock_conn_fail2.is_connected.return_value = False
-        mock_conn_fail2.status.return_value = obd.OBDStatus.ELM_ERROR
+        # Some python-obd versions don't define ELM_ERROR; use NOT_CONNECTED as a
+        # representative failure status for the test environment.
+        mock_conn_fail2.status.return_value = getattr(obd.OBDStatus, 'ELM_ERROR', obd.OBDStatus.NOT_CONNECTED)
         mock_conn_fail2.close = MagicMock()
 
         mock_conn_success = MagicMock()

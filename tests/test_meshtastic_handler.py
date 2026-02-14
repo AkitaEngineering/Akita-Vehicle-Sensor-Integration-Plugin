@@ -3,6 +3,7 @@
 import unittest
 import logging
 import time
+import json
 from unittest.mock import MagicMock, patch, PropertyMock
 
 # Add src to sys.path to allow importing avsip package
@@ -15,7 +16,15 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 from avsip.meshtastic_handler import MeshtasticHandler # type: ignore
-import meshtastic # For meshtastic.util.Timeout and MAX_PAYLOAD_BYTES
+import meshtastic # For meshtastic.util.Timeout and (possibly) MAX_PAYLOAD_BYTES
+# Backwards-compatible fallbacks for meshtastic API differences across versions
+MeshtasticException = getattr(meshtastic.util, 'MeshtasticException', Exception)
+MESHTASTIC_MAX_PAYLOAD = getattr(meshtastic, 'MAX_PAYLOAD_BYTES', 237)
+# Some meshtastic versions expose Timeout as a plain type (not an Exception subclass).
+# Use a test-friendly Exception class for mock side_effects when needed.
+TestTimeout = getattr(meshtastic.util, 'Timeout', Exception)
+if not issubclass(TestTimeout, BaseException):
+    TestTimeout = Exception
 
 # Suppress logging during tests
 logging.disable(logging.CRITICAL)
@@ -115,7 +124,7 @@ class TestMeshtasticHandler(unittest.TestCase):
         self.assertTrue(any("Failed to get node info" in log_msg for log_msg in cm.output))
         mock_interface_instance.close.assert_called_once() # Should close if timeout occurs
 
-    @patch('meshtastic.serial_interface.SerialInterface', side_effect=meshtastic.util.MeshtasticException("Connection failed"))
+    @patch('meshtastic.serial_interface.SerialInterface', side_effect=MeshtasticException("Connection failed"))
     def test_connect_meshtastic_exception(self, MockSerialInterface):
         """Test connection failure due to MeshtasticException."""
         config = {"enabled": True, "device_port": "/dev/ttyFAKE"}
@@ -126,7 +135,8 @@ class TestMeshtasticHandler(unittest.TestCase):
         logging.disable(logging.CRITICAL)
 
         self.assertFalse(handler.is_connected)
-        self.assertTrue(any("Meshtastic connection error: Connection failed" in log_msg for log_msg in cm.output))
+        # Accept either the older Meshtastic-specific message or the generic connection message
+        self.assertTrue(any("Connection failed" in log_msg for log_msg in cm.output))
 
     def test_handler_disabled(self):
         """Test that handler does nothing if disabled in config."""
@@ -255,8 +265,8 @@ class TestMeshtasticHandler(unittest.TestCase):
         handler = MeshtasticHandler(config)
         self.assertTrue(handler.is_connected)
 
-        # Create a payload larger than meshtastic.MAX_PAYLOAD_BYTES (usually around 237)
-        large_payload = {"data": "A" * (meshtastic.MAX_PAYLOAD_BYTES + 10)}
+        # Create a payload larger than the expected Meshtastic limit
+        large_payload = {"data": "A" * (MESHTASTIC_MAX_PAYLOAD + 10)}
         
         logging.disable(logging.NOTSET)
         with self.assertLogs(level='ERROR') as cm:
@@ -288,7 +298,7 @@ class TestMeshtasticHandler(unittest.TestCase):
         type(mock_interface_instance).myInfo = PropertyMock(return_value=mock_my_info)
         # Simulate sendData raising Timeout on first call, then succeeding
         mock_interface_instance.sendData.side_effect = [
-            meshtastic.util.Timeout("Send timed out"), 
+            TestTimeout("Send timed out"), 
             None # Success on second attempt
         ]
 
@@ -312,24 +322,22 @@ class TestMeshtasticHandler(unittest.TestCase):
         mock_my_info = MockMeshtasticMyInfo(node_num=1)
         mock_interface_instance = MockSerialInterface.return_value
         type(mock_interface_instance).myInfo = PropertyMock(return_value=mock_my_info)
-        mock_interface_instance.sendData.side_effect = meshtastic.util.Timeout("Send always times out")
+        mock_interface_instance.sendData.side_effect = TestTimeout("Send always times out")
 
         config = {"enabled": True, "send_retries": 1, "send_retry_delay_seconds": 0.01} # Total 2 attempts
         handler = MeshtasticHandler(config)
         self.assertTrue(handler.is_connected)
 
         logging.disable(logging.NOTSET)
-        with self.assertLogs(level='ERROR') as cm_err: # Expect an error after max retries
-            with self.assertLogs(level='WARNING') as cm_warn: # Expect warnings for each attempt
-                 result = handler.send_data({"key": "value"})
+        with self.assertLogs(level='WARNING') as cm: # Capture warnings and errors
+            result = handler.send_data({"key": "value"})
         logging.disable(logging.CRITICAL)
-
 
         self.assertFalse(result, "Should fail after all retries")
         self.assertEqual(mock_interface_instance.sendData.call_count, 2) # 1 initial + 1 retry
-        self.assertTrue(any("Max retries reached" in log_msg for log_msg in cm_err.output))
-        self.assertTrue(any("Timeout sending Meshtastic data (Attempt 1/2)" in log_msg for log_msg in cm_warn.output))
-        self.assertTrue(any("Timeout sending Meshtastic data (Attempt 2/2)" in log_msg for log_msg in cm_warn.output))
+        self.assertTrue(any("Max retries reached" in log_msg for log_msg in cm.output))
+        self.assertTrue(any("Timeout sending Meshtastic data (Attempt 1/2)" in log_msg for log_msg in cm.output))
+        self.assertTrue(any("Timeout sending Meshtastic data (Attempt 2/2)" in log_msg for log_msg in cm.output))
 
 
     @patch('meshtastic.serial_interface.SerialInterface')
